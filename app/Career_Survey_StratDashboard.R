@@ -32,7 +32,7 @@ library(tidyr)
 library(ggplot2)
 
 # ---- source your stratification functions here ------------------------------
-setwd("X:/Arian/Career_Survey")
+
 source("Career_Survey_StratSimulation.R")  # the script we wrote earlier
 
 ui <- fluidPage(
