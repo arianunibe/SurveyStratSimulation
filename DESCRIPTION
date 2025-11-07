@@ -1,0 +1,17 @@
+Package: stratifySimApp
+Type: ShinyApp
+Title: Stratification Simulator
+Version: 0.1.0
+Authors@R: person("Arian", "Studer", email = "arian.studer@unibe.ch", role = c("aut", "cre"))
+Description: Simulator for Qualtrics stratification with rule editor.
+License: MIT
+Encoding: UTF-8
+LazyData: true
+Imports:
+    shiny,
+    dplyr,
+    tidyr,
+    purrr,
+    stringr,
+    ggplot2
+RoxygenNote: 7.1.2

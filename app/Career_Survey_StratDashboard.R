@@ -1,0 +1,193 @@
+#######################################
+# Test Stratification Career Survey - App withour rule editor
+#######################################
+# Autor: Arian Studer
+# Date: 06.11.2025
+
+
+# stratification variables:
+#   - field of study (FoS): STEM-IT (computer science (CS), math, physics, electrical engineering (EE), statistics), non-STEM-IT (all other fields) 
+#   - parental tertiary education: yes (high SES), no (low SES) 
+#   - gender: man, woman, other, prefer not to say
+
+# rules: 
+# rule 1: Module 3 gets 75% of computer science
+# rule 2: module 3 gets 40% of the total pool of math, statistics, physics, EE 
+# rule 3: module 3 gets 0 % of non-STEM-IT (hard exclusion)
+# rule 4: module 1 gets 70 & of interviewees with Low SES & Non-STEM-IT
+# rule 5: STEM-IT which are not in module 3 are equally split across module 1, 2 and 4 
+# rule 6: Non-STEM-IT & low SES which are not in module 1 are equally split between modules 2 and 4
+# rule 7: non-STEM-IT & high SES are equally split between modules 1, 2 and 4 
+# rule 8: gender should be rougly balanced within the modules but do not affect probabilities
+# rule 9: when module 3 reaches a total of 1500 it becomes ineligible. the probabilieties are re-normalized over the remaining eligible modules. 
+# rule 10: when module 1 reaches 1000 participants with low SES, the 70% boost is stoped and the probabilities are re-normalized over eligible modules.
+# rule 11: when rule 9 and 10 are in effect, we use equal randomization across eligible modules for each stratum.
+# general: all rules concerning module 3 (rule 1, rule 2 and rule 3) have higher priority than the other rules.
+
+
+# ---- libraries ----
+library(shiny)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+# ---- source your stratification functions here ------------------------------
+setwd("X:/Arian/Career_Survey")
+source("Career_Survey_StratSimulation.R")  # the script we wrote earlier
+
+ui <- fluidPage(
+  titlePanel("Survey Stratification Simulator"),
+  
+  sidebarLayout(
+    sidebarPanel(
+      numericInput("N", "Number of participants", 5000, min = 100, step = 100),
+      sliderInput("pCS", "Share Computer Science (%)", 0, 100, 18),
+      sliderInput("pMSPEE", "Share Math/Stats/Phys/EE (%)", 0, 100, 32),
+      sliderInput("pNonSTEM", "Share Non-STEM (%)", 0, 100, 50),
+      sliderInput("pLow", "Low SES (%)", 0, 100, 45),
+      numericInput("m3_cap", "Module 3 cap", 1500, min = 100, step = 100),
+      numericInput("m1_cap", "M1 low SES cap", 1000, min = 100, step = 100),
+      actionButton("run", "Run simulation")
+    ),
+    
+    mainPanel(
+      tabsetPanel(
+        tabPanel("Module characteristics", tableOutput("table_modules")),
+        tabPanel("FoS × SES table", tableOutput("table_stratum")),
+        tabPanel("Gender balance", plotOutput("plot_gender")),
+        tabPanel("Summary", verbatimTextOutput("summary_text"))
+      )
+    )
+  )
+)
+
+server <- function(input, output, session) {
+  sim_data <- eventReactive(input$run, {
+    # normalize FoS shares to sum to 1 (in case user fiddles sliders)
+    pCS <- input$pCS/100
+    pMSPEE <- input$pMSPEE/100
+    pNonSTEM <- input$pNonSTEM/100
+    total_fos <- pCS + pMSPEE + pNonSTEM
+    if (total_fos <= 0) {
+      # fallback to defaults if user sets everything to zero
+      pCS <- 0.18; pMSPEE <- 0.32; pNonSTEM <- 0.50
+    } else {
+      pCS <- pCS / total_fos
+      pMSPEE <- pMSPEE / total_fos
+      pNonSTEM <- pNonSTEM / total_fos
+    }
+    
+    pLow <- input$pLow/100
+    if (pLow <= 0) pLow <- 0.45
+    
+    participants <- make_participants(
+      N = input$N,
+      marginals = list(
+        fos = c(CS = pCS, MSPEE = pMSPEE, NonSTEM = pNonSTEM),
+        ses = c(Low = pLow, High = 1 - pLow),
+        gender = c(man = .46, woman = .46, other = .05, pns = .03)
+      )
+    )
+    
+    simulate_stratification(participants,
+                            m3_cap = input$m3_cap,
+                            m1_low_cap = input$m1_cap)
+  })
+  
+  output$table_modules <- renderTable({
+    sim <- sim_data()
+    
+    # Build a table: for each module, counts and shares of FoS
+    tab_fos <- sim$assignments %>%
+      count(chosen, FoS, name = "n") %>%
+      group_by(chosen) %>%
+      mutate(module_total = sum(n),
+             share = n / module_total) %>%
+      ungroup()
+    
+    # pivot wider to have columns per FoS with counts and shares
+    counts_fos_wide <- tab_fos %>%
+      select(chosen, FoS, n) %>%
+      pivot_wider(names_from = FoS, values_from = n, values_fill = 0) %>%
+      rename(Module = chosen)
+    
+    shares_fos_wide <- tab_fos %>%
+      select(chosen, FoS, share) %>%
+      pivot_wider(names_from = FoS, values_from = share, values_fill = 0) %>%
+      rename(Module = chosen) %>%
+      mutate(across(-Module, ~ round(.x, 3)))
+    
+    fos_out <- counts_fos_wide %>%
+      left_join(shares_fos_wide, by = "Module", suffix = c("_count", "_share"))
+    
+    # --- SES composition (counts + shares) ----------------------------------
+    tab_ses <- sim$assignments %>%
+      count(chosen, SES, name = "n") %>%
+      group_by(chosen) %>%
+      mutate(module_total = sum(n),
+             share = n / module_total) %>%
+      ungroup()
+    
+    counts_ses_wide <- tab_ses %>%
+      select(chosen, SES, n) %>%
+      pivot_wider(names_from = SES, values_from = n, values_fill = 0) %>%
+      rename(Module = chosen)
+    
+    shares_ses_wide <- tab_ses %>%
+      select(chosen, SES, share) %>%
+      pivot_wider(names_from = SES, values_from = share, values_fill = 0) %>%
+      rename(Module = chosen) %>%
+      mutate(across(-Module, ~ round(.x, 3)))
+    
+    ses_out <- counts_ses_wide %>%
+      left_join(shares_ses_wide, by = "Module", suffix = c("_count", "_share"))
+    
+    # combine FoS and SES outputs side-by-side
+    out <- fos_out %>%
+      full_join(ses_out, by = "Module", suffix = c("", ""))
+    
+    # add module total column (ensure present)
+    module_totals <- sim$assignments %>%
+      count(chosen, name = "Total") %>%
+      rename(Module = chosen)
+    out <- left_join(out, module_totals, by = "Module")
+    
+    # tidy column order: Module, Total, FoS_count/ FoS_share pairs, SES_count/SES_share pairs
+    fos_order <- c("CS", "MSPEE", "NonSTEM")
+    ses_order <- c("Low", "High")
+    ordered_cols <- c("Module", "Total",
+                      as.vector(rbind(paste0(fos_order, "_count"), paste0(fos_order, "_share"))),
+                      as.vector(rbind(paste0(ses_order, "_count"), paste0(ses_order, "_share"))))
+    # keep only columns that exist (safety)
+    ordered_cols <- ordered_cols[ordered_cols %in% names(out)]
+    out <- out %>% select(any_of(ordered_cols))
+    
+    # ensure modules order M1..M4
+    out <- out %>% arrange(factor(Module, levels = c("M1", "M2", "M3", "M4")))
+    
+    out
+  }, striped = TRUE, hover = TRUE, spacing = "m")
+  
+  output$table_stratum <- renderTable({
+    sim_data()$stratum_by_module %>%
+      select(FoS, SES, chosen, n, share) %>%
+      arrange(FoS, SES, chosen)
+  })
+  
+  output$plot_gender <- renderPlot({
+    sim <- sim_data()
+    ggplot(sim$gender_by_module, aes(Gender, share, fill = Gender)) +
+      geom_col() +
+      facet_wrap(~chosen) +
+      theme_minimal() +
+      labs(y="Share", title="Gender balance by module")
+  })
+  
+  output$summary_text <- renderPrint({
+    sim <- sim_data()
+    sim$final_counters
+  })
+}
+shinyApp(ui = ui, server = server)
+
+
