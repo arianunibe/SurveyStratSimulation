@@ -25,6 +25,14 @@
 # general: all rules concerning module 3 (rule 1, rule 2 and rule 3) have higher priority than the other rules.
 
 
+# Changes:
+# 10.11. new rule
+#     rule 12: no PH participants for Module 1? (Cecilia)
+#     additional fos_level "PH"
+#     updated base_probs so "PH" follows NonSTEM branches
+#     updated apply_caps to treat "PH" as ineligible for M1
+
+
 # ---- libraries ----
 library(shiny)
 library(dplyr)
@@ -44,6 +52,7 @@ ui <- fluidPage(
       sliderInput("pCS", "Share Computer Science (%)", 0, 100, 18),
       sliderInput("pMSPEE", "Share Math/Stats/Phys/EE (%)", 0, 100, 32),
       sliderInput("pNonSTEM", "Share Non-STEM (%)", 0, 100, 50),
+      sliderInput("pPH", "Share PH (subcategory of Non-STEM) (%)", 0, 100, 0), # NEW
       sliderInput("pLow", "Low SES (%)", 0, 100, 45),
       numericInput("m3_cap", "Module 3 cap", 1500, min = 100, step = 100),
       numericInput("m1_cap", "M1 low SES cap", 1000, min = 100, step = 100),
@@ -55,11 +64,34 @@ ui <- fluidPage(
         tabPanel("Module characteristics", tableOutput("table_modules")),
         tabPanel("FoS × SES table", tableOutput("table_stratum")),
         tabPanel("Gender balance", plotOutput("plot_gender")),
-        tabPanel("Summary", verbatimTextOutput("summary_text"))
+        tabPanel("Summary", verbatimTextOutput("summary_text")),
+        tabPanel("Notes", verbatimTextOutput("notes"))
       )
     )
   )
 )
+
+version_notes <- "
+Base rules - Version 1.1: 
+rule 1: Module 3 gets 75% of computer science
+rule 2: module 3 gets 40% of the total pool of math, statistics, physics, EE 
+rule 3: module 3 gets 0 % of non-STEM-IT (hard exclusion)
+rule 4: module 1 gets 70 & of interviewees with Low SES & Non-STEM-IT
+rule 5: STEM-IT which are not in module 3 are equally split across module 1, 2 and 4 
+rule 6: Non-STEM-IT & low SES which are not in module 1 are equally split between modules 2 and 4
+rule 7: non-STEM-IT & high SES are equally split between modules 1, 2 and 4 
+rule 8: gender should be rougly balanced within the modules but do not affect probabilities
+rule 9: when module 3 reaches a total of 1500 it becomes ineligible. the probabilieties are re-normalized over the remaining eligible modules. 
+rule 10: when module 1 reaches 1000 participants with low SES, the 70% boost is stoped and the probabilities are re-normalized over eligible modules.
+rule 11: when rule 9 and 10 are in effect, we use equal randomization across eligible modules for each stratum.
+general: all rules concerning module 3 (rule 1, rule 2 and rule 3) have higher priority than the other rules.
+
+Version 1.2 - last changed 10.11.2025
+Changes:
+- Added FoS category 'PH'
+- PH is treated as NonSTEM but has a hard exclusion from M1
+- Updated participant generator and cap logic accordingly
+"
 
 server <- function(input, output, session) {
   sim_data <- eventReactive(input$run, {
@@ -67,14 +99,16 @@ server <- function(input, output, session) {
     pCS <- input$pCS/100
     pMSPEE <- input$pMSPEE/100
     pNonSTEM <- input$pNonSTEM/100
-    total_fos <- pCS + pMSPEE + pNonSTEM
+    pPH <- input$pPH/100
+    total_fos <- pCS + pMSPEE + pNonSTEM + pPH
     if (total_fos <= 0) {
       # fallback to defaults if user sets everything to zero
-      pCS <- 0.18; pMSPEE <- 0.32; pNonSTEM <- 0.50
+      pCS <- 0.18; pMSPEE <- 0.32; pNonSTEM <- 0.50; pPH <- 0
     } else {
       pCS <- pCS / total_fos
       pMSPEE <- pMSPEE / total_fos
       pNonSTEM <- pNonSTEM / total_fos
+      pPH <- pPH / total_fos
     }
     
     pLow <- input$pLow/100
@@ -83,7 +117,7 @@ server <- function(input, output, session) {
     participants <- make_participants(
       N = input$N,
       marginals = list(
-        fos = c(CS = pCS, MSPEE = pMSPEE, NonSTEM = pNonSTEM),
+        fos = c(CS = pCS, MSPEE = pMSPEE, NonSTEM = pNonSTEM, PH = pPH),
         ses = c(Low = pLow, High = 1 - pLow),
         gender = c(man = .46, woman = .46, other = .05, pns = .03)
       )
@@ -153,7 +187,7 @@ server <- function(input, output, session) {
     out <- left_join(out, module_totals, by = "Module")
     
     # tidy column order: Module, Total, FoS_count/ FoS_share pairs, SES_count/SES_share pairs
-    fos_order <- c("CS", "MSPEE", "NonSTEM")
+    fos_order <- c("CS", "MSPEE", "NonSTEM", "PH")   # PH included
     ses_order <- c("Low", "High")
     ordered_cols <- c("Module", "Total",
                       as.vector(rbind(paste0(fos_order, "_count"), paste0(fos_order, "_share"))),
@@ -186,6 +220,10 @@ server <- function(input, output, session) {
   output$summary_text <- renderPrint({
     sim <- sim_data()
     sim$final_counters
+  })
+  
+  output$notes <- renderText({
+    version_notes
   })
 }
 shinyApp(ui = ui, server = server)

@@ -25,6 +25,14 @@
 # general: all rules concerning module 3 (rule 1, rule 2 and rule 3) have higher priority than the other rules.
 
 
+# Changes:
+# 10.11. new rule
+#     rule 12: no PH participants for Module 1? (Cecilia)
+#     additional fos_level "PH"
+#     updated base_probs so "PH" follows NonSTEM branches
+#     updated apply_caps to treat "PH" as ineligible for M1
+
+
 
 
 # ---- libraries ----
@@ -37,7 +45,7 @@ suppressPackageStartupMessages({
 
 
 # ---- Helper: enumerate allowed levels ----
-fos_levels   <- c("CS", "MSPEE", "NonSTEM")
+fos_levels   <- c("CS", "MSPEE", "NonSTEM", "PH")
 ses_levels   <- c("Low", "High")
 gender_levels<- c("man","woman","other","pns")
 module_levels<- c("M1","M2","M3","M4")
@@ -53,11 +61,12 @@ base_probs <- function(fos, ses) {
     # Rule 2 + 5
     return(c(M1=0.20, M2=0.20, M3=0.40, M4=0.20))
   }
-  if (fos == "NonSTEM" && ses == "Low") {
+  # Treat PH as a subcategory of NonSTEM (same base probs as NonSTEM)
+  if (fos %in% c("NonSTEM", "PH") && ses == "Low") {
     # Rule 3 + 4 + 6
     return(c(M1=0.70, M2=0.15, M3=0.00, M4=0.15))
   }
-  if (fos == "NonSTEM" && ses == "High") {
+  if (fos %in% c("NonSTEM", "PH") && ses == "High") {
     # Rule 3 + 7
     return(c(M1=1/3, M2=1/3, M3=0.00, M4=1/3))
   }
@@ -78,7 +87,12 @@ apply_caps <- function(p, fos, ses, caps) {
   # build eligibility from caps
   ineligible <- character(0)
   if (isTRUE(caps$m3_closed)) ineligible <- c(ineligible, "M3")
-  # Cap 2 never makes M1 ineligible; it only removes the boost for NonSTEM&Low
+  # Hard exclusion: PH must never be assigned M1
+  if (fos == "PH") ineligible <- c(ineligible, "M1")
+  # Cap 2 never makes M1 ineligible in general; but PH hard exclusion still applies above.
+  
+  # Ensure any explicitly ineligible modules are zero
+  p[ineligible] <- 0
   
   # BOTH caps active → equal split across eligible modules (Rule 11)
   if (isTRUE(caps$m3_closed) && isTRUE(caps$m1_low_closed)) {
@@ -95,9 +109,16 @@ apply_caps <- function(p, fos, ses, caps) {
   
   # Cap 2 (M1 Low-SES cap reached) affects ONLY NonSTEM & Low:
   # drop the 70% boost and revert to equal split over M1, M2, M4
-  if (isTRUE(caps$m1_low_closed) && fos == "NonSTEM" && ses == "Low") {
+  # BUT: for PH (sub-category) we must not give any probability to M1.
+  if (isTRUE(caps$m1_low_closed) && fos %in% c("NonSTEM","PH") && ses == "Low") {
     p[] <- 0
-    p[c("M1","M2","M4")] <- 1/3
+    if (fos == "PH") {
+      # PH: distribute equally over M2 and M4 only (M1 forbidden)
+      p[c("M2","M4")] <- 1/2
+    } else {
+      # NonSTEM: equal split over M1, M2, M4 (original behavior)
+      p[c("M1","M2","M4")] <- 1/3
+    }
   }
   
   # final renormalization (keeps any zeroed modules at 0)
@@ -248,7 +269,7 @@ if (sys.nframe() == 0) {
   participants <- make_participants(
     N = N,
     marginals = list(
-      fos    = c(CS=.18, MSPEE=.32, NonSTEM=.50),   # tweak shares here
+      fos    = c(CS=.18, MSPEE=.32, NonSTEM=.49, PH = .01),
       ses    = c(Low=.45, High=.55),
       gender = c(man=.46, woman=.46, other=.05, pns=.03)
     ),
