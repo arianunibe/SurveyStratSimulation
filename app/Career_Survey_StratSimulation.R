@@ -49,6 +49,7 @@ fos_levels   <- c("CS", "MSPEE", "NonSTEM", "PH")
 ses_levels   <- c("Low", "High")
 gender_levels<- c("man","woman","other","pns")
 module_levels<- c("M1","M2","M3","M4")
+leadership_levels <- c("Low", "High")
 
 # ---- Base probabilities per stratum (Rules 1–7, priority for M3 rules) ----
 base_probs <- function(fos, ses) {
@@ -74,12 +75,12 @@ base_probs <- function(fos, ses) {
 }
 
 # ---- Apply caps & renormalization (Rules 9–11) ----------------------------
-  # p is named vector c(M1,M2,M3,M4)
-  # caps$m3_closed (TRUE if M3 >= 1500), caps$m1_low_closed (TRUE if M1 Low-SES >= 1000)
-  # Implement our explicit refinements:
-  # - If M3 closed: set M3=0, renormalize
-  # - If M1 Low-SES closed: for NonSTEM & Low only, revert to equal split over M1,M2,M4
-  # - If both closed: equal randomization across eligible modules for each stratum (Rule 11)
+# p is named vector c(M1,M2,M3,M4)
+# caps$m3_closed (TRUE if M3 >= 1500), caps$m1_low_closed (TRUE if M1 Low-SES >= 1000)
+# Implement our explicit refinements:
+# - If M3 closed: set M3=0, renormalize
+# - If M1 Low-SES closed: for NonSTEM & Low only, revert to equal split over M1,M2,M4
+# - If both closed: equal randomization across eligible modules for each stratum (Rule 11)
 
 apply_caps <- function(p, fos, ses, caps) {
   # p is named vector c(M1,M2,M3,M4)
@@ -139,9 +140,10 @@ draw_module <- function(p) {
 #  (b) a data frame with columns FoS, SES, Gender (then N = nrow(df))
 make_participants <- function(N = NULL,
                               marginals = list(
-                                fos    = c(CS=.15, MSPEE=.35, NonSTEM=.50),
+                                fos    = c(CS=.15, MSPEE=.35, NonSTEM=.50, PH = 0),
                                 ses    = c(Low=.40, High=.60),
-                                gender = c(man=.45, woman=.45, other=.07, pns=.03)
+                                gender = c(man=.45, woman=.45, other=.07, pns=.03),
+                                leadership = c(Low = .50, High = .50)
                               ),
                               df = NULL,
                               seed = 1) {
@@ -150,16 +152,20 @@ make_participants <- function(N = NULL,
     df <- df %>%
       transmute(FoS = factor(FoS, levels=fos_levels),
                 SES = factor(SES, levels=ses_levels),
-                Gender = factor(Gender, levels=gender_levels))
+                Gender = factor(Gender, levels=gender_levels),
+                Leadership = factor(Leadership, levels = leadership_levels))
     return(df)
   }
   stopifnot(!is.null(N))
+  # align marginals robustly if you implemented align_marginal earlier; otherwise simple sampling:
   fos <- sample(fos_levels,   N, replace=TRUE, prob = marginals$fos[fos_levels])
   ses <- sample(ses_levels,   N, replace=TRUE, prob = marginals$ses[ses_levels])
   gen <- sample(gender_levels,N, replace=TRUE, prob = marginals$gender[gender_levels])
+  lead <- sample(leadership_levels, N, replace=TRUE, prob = marginals$leadership[leadership_levels])
   tibble(FoS=factor(fos, levels=fos_levels),
          SES=factor(ses, levels=ses_levels),
-         Gender=factor(gen, levels=gender_levels))
+         Gender=factor(gen, levels=gender_levels),
+         Leadership=factor(lead, levels=leadership_levels))
 }
 
 # ---- Main simulator --------------------------------------------------------
@@ -180,7 +186,16 @@ simulate_stratification <- function(participants,
            M1=NA_real_, M2=NA_real_, M3=NA_real_, M4=NA_real_,
            chosen = NA_character_,
            m3_closed = FALSE,
-           m1_low_closed = FALSE)
+           m1_low_closed = FALSE,
+           forced_M2 = FALSE)   # new column to mark forced allocations
+  
+  # --- PRECOMPUTE TARGET for hard allocation: 60% of (woman & High leadership)
+  is_woman_high <- as.character(participants$Gender) == "woman" &
+    as.character(participants$Leadership) == "High"
+  subgroup_idx <- which(is_woman_high)
+  n_subgroup <- length(subgroup_idx)
+  n_target_force_M2 <- if (n_subgroup > 0) round(0.6 * n_subgroup) else 0L
+  forced_M2_assigned <- 0L
   
   for (i in seq_len(nrow(participants))) {
     fos <- as.character(participants$FoS[i])
@@ -198,8 +213,23 @@ simulate_stratification <- function(participants,
     # Apply caps & renormalize (Rules 9–11)
     p_adj <- apply_caps(p, fos, ses, caps)
     
-    # Draw module
-    m <- draw_module(p_adj)
+    # HARD ALLOCATION rule (not probabilistic):
+    # If this participant belongs to the subgroup and we haven't yet
+    # assigned the target number of forced M2s, assign M2 directly.
+    if (is_woman_high[i] && forced_M2_assigned < n_target_force_M2) {
+      m <- "M2"
+      forced_M2_assigned <- forced_M2_assigned + 1L
+      forced_flag <- TRUE
+    } else {
+      # normal draw
+      # safety: if p_adj sums to zero (should not happen), fall back to equal prob
+      if (sum(p_adj, na.rm = TRUE) <= 0) {
+        nonzero_names <- names(p_adj)
+        p_adj[] <- 1 / length(p_adj)
+      }
+      m <- draw_module(p_adj)
+      forced_flag <- FALSE
+    }
     
     # Update counters
     tot_mod[m] <- tot_mod[m] + 1L
@@ -210,14 +240,16 @@ simulate_stratification <- function(participants,
     out$chosen[i] <- m
     out$m3_closed[i] <- caps$m3_closed
     out$m1_low_closed[i] <- caps$m1_low_closed
+    out$forced_M2[i] <- forced_flag
     
     if (log_every > 0 && i %% log_every == 0) {
-      message(sprintf("i=%d | M1=%d (LowSES=%d) M2=%d M3=%d M4=%d",
-                      i, tot_mod["M1"], m1_low_counter, tot_mod["M2"], tot_mod["M3"], tot_mod["M4"]))
+      message(sprintf("i=%d | M1=%d (LowSES=%d) M2=%d M3=%d M4=%d | forced_M2_assigned=%d",
+                      i, tot_mod["M1"], m1_low_counter, tot_mod["M2"], tot_mod["M3"], tot_mod["M4"],
+                      forced_M2_assigned))
     }
   }
   
-  # Summaries
+  # Summaries (unchanged)
   sum_mod <- out %>%
     count(chosen, name = "n") %>%
     complete(chosen = module_levels, fill = list(n=0L)) %>%
@@ -243,10 +275,13 @@ simulate_stratification <- function(participants,
     gender_by_module = sum_gender,
     final_counters = list(
       modules = tot_mod,
-      m1_lowSES = m1_low_counter
+      m1_lowSES = m1_low_counter,
+      forced_M2_target = n_target_force_M2,
+      forced_M2_assigned = forced_M2_assigned
     )
   )
 }
+
 
 # ---- how to use it: ----
 
@@ -269,9 +304,10 @@ if (sys.nframe() == 0) {
   participants <- make_participants(
     N = N,
     marginals = list(
-      fos    = c(CS=.18, MSPEE=.32, NonSTEM=.49, PH = .01),
-      ses    = c(Low=.45, High=.55),
-      gender = c(man=.46, woman=.46, other=.05, pns=.03)
+      fos        = c(CS = .18, MSPEE = .32, NonSTEM = .49, PH = .01),
+      ses        = c(Low = .45, High = .55),
+      gender     = c(man = .46, woman = .46, other = .05, pns = .03),
+      leadership = c(High = .50, Low = .50)   # <-- NEW: include Leadership marginals
     ),
     seed = 123
   )
@@ -291,6 +327,12 @@ if (sys.nframe() == 0) {
   message("First M3-closed at id: ", ifelse(is.finite(first_m3_closed), first_m3_closed, "never"))
   message("First M1-LowSES-closed at id: ", ifelse(is.finite(first_m1low_closed), first_m1low_closed, "never"))
   
-  # Quick gender balance check per module
+  # Quick gender & leadership balance check per module
   print(sim$gender_by_module %>% arrange(chosen, desc(share)))
+  # check forced allocation among the subgroup
+  print(glue::glue("Forced M2 target: {sim$final_counters$forced_M2_target}, assigned: {sim$final_counters$forced_M2_assigned}"))
+  print(sim$assignments %>% filter(Gender=="woman", Leadership=="High") %>% count(chosen))
 }
+
+
+

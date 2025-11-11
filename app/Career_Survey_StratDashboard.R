@@ -54,6 +54,7 @@ ui <- fluidPage(
       sliderInput("pNonSTEM", "Share Non-STEM (%)", 0, 100, 50),
       sliderInput("pPH", "Share PH (subcategory of Non-STEM) (%)", 0, 100, 0), # NEW
       sliderInput("pLow", "Low SES (%)", 0, 100, 45),
+      sliderInput("pLeadHigh", "Share Leadership ambition — High (%)", 0, 100, 50),
       numericInput("m3_cap", "Module 3 cap", 1500, min = 100, step = 100),
       numericInput("m1_cap", "M1 low SES cap", 1000, min = 100, step = 100),
       actionButton("run", "Run simulation")
@@ -91,6 +92,12 @@ Changes:
 - Added FoS category 'PH'
 - PH is treated as NonSTEM but has a hard exclusion from M1
 - Updated participant generator and cap logic accordingly
+
+Version 1.3 - last changed 11.11.2025
+Changes:
+- new level: leadership_ambitions: High/Low
+- added leadership_ambitions as slider to participant creator
+- new rule: exactly 60% of participants with Gender == woman & Leadership == High to M2
 "
 
 server <- function(input, output, session) {
@@ -114,12 +121,17 @@ server <- function(input, output, session) {
     pLow <- input$pLow/100
     if (pLow <= 0) pLow <- 0.45
     
+    # compute leadership marginal
+    pLeadHigh <- input$pLeadHigh / 100
+    if (is.null(pLeadHigh) || pLeadHigh < 0) pLeadHigh <- 0.5
+    
     participants <- make_participants(
       N = input$N,
       marginals = list(
         fos = c(CS = pCS, MSPEE = pMSPEE, NonSTEM = pNonSTEM, PH = pPH),
         ses = c(Low = pLow, High = 1 - pLow),
-        gender = c(man = .46, woman = .46, other = .05, pns = .03)
+        gender = c(man = .46, woman = .46, other = .05, pns = .03),
+        leadership = c(High = pLeadHigh, Low = 1 - pLeadHigh)
       )
     )
     
@@ -173,12 +185,57 @@ server <- function(input, output, session) {
       rename(Module = chosen) %>%
       mutate(across(-Module, ~ round(.x, 3)))
     
+    # rename Low/High columns to LowSES/HighSES (both count and share)
+    counts_ses_wide <- counts_ses_wide %>%
+      rename_with(.cols = everything(), .fn = function(x) x) # noop to satisfy pipe
+    # perform renames if columns exist
+    if ("Low" %in% names(counts_ses_wide)) names(counts_ses_wide)[names(counts_ses_wide) == "Low"] <- "LowSES_count"
+    if ("High" %in% names(counts_ses_wide)) names(counts_ses_wide)[names(counts_ses_wide) == "High"] <- "HighSES_count"
+    if ("Low" %in% names(shares_ses_wide)) names(shares_ses_wide)[names(shares_ses_wide) == "Low"] <- "LowSES_share"
+    if ("High" %in% names(shares_ses_wide)) names(shares_ses_wide)[names(shares_ses_wide) == "High"] <- "HighSES_share"
+    
     ses_out <- counts_ses_wide %>%
       left_join(shares_ses_wide, by = "Module", suffix = c("_count", "_share"))
     
-    # combine FoS and SES outputs side-by-side
+    # --- Leadership composition: focus on High leadership only -----------------
+    tab_lead <- sim$assignments %>%
+      count(chosen, Leadership, name = "n") %>%
+      group_by(chosen) %>%
+      mutate(module_total = sum(n),
+             share = n / module_total) %>%
+      ungroup()
+    
+    counts_lead_wide <- tab_lead %>%
+      select(chosen, Leadership, n) %>%
+      pivot_wider(names_from = Leadership, values_from = n, values_fill = 0) %>%
+      rename(Module = chosen)
+    
+    shares_lead_wide <- tab_lead %>%
+      select(chosen, Leadership, share) %>%
+      pivot_wider(names_from = Leadership, values_from = share, values_fill = 0) %>%
+      rename(Module = chosen) %>%
+      mutate(across(-Module, ~ round(.x, 0)))
+    
+    # create HighLead_count / HighLead_share columns (safe if Leadership levels missing)
+    if ("High" %in% names(counts_lead_wide)) {
+      counts_lead_wide <- counts_lead_wide %>% rename(HighLead_count = High)
+    } else {
+      counts_lead_wide$HighLead_count <- 0
+    }
+    if ("High" %in% names(shares_lead_wide)) {
+      shares_lead_wide <- shares_lead_wide %>% rename(HighLead_share = High)
+    } else {
+      shares_lead_wide$HighLead_share <- 0
+    }
+    
+    lead_out <- counts_lead_wide %>%
+      left_join(shares_lead_wide, by = "Module", suffix = c("_count", "_share")) %>%
+      select(Module, HighLead_count, HighLead_share)
+    
+    # combine FoS, SES and Leadership outputs side-by-side
     out <- fos_out %>%
-      full_join(ses_out, by = "Module", suffix = c("", ""))
+      full_join(ses_out, by = "Module", suffix = c("", "")) %>%
+      left_join(lead_out, by = "Module")
     
     # add module total column (ensure present)
     module_totals <- sim$assignments %>%
@@ -186,12 +243,13 @@ server <- function(input, output, session) {
       rename(Module = chosen)
     out <- left_join(out, module_totals, by = "Module")
     
-    # tidy column order: Module, Total, FoS_count/ FoS_share pairs, SES_count/SES_share pairs
-    fos_order <- c("CS", "MSPEE", "NonSTEM", "PH")   # PH included
-    ses_order <- c("Low", "High")
+    # tidy column order: Module, Total, FoS_count/ FoS_share pairs, SES_count/SES_share pairs, Leadership
+    fos_order <- c("CS", "MSPEE", "NonSTEM", "PH")
+    ses_order <- c("LowSES", "HighSES")
     ordered_cols <- c("Module", "Total",
                       as.vector(rbind(paste0(fos_order, "_count"), paste0(fos_order, "_share"))),
-                      as.vector(rbind(paste0(ses_order, "_count"), paste0(ses_order, "_share"))))
+                      as.vector(rbind(paste0(ses_order, "_count"), paste0(ses_order, "_share"))),
+                      "HighLead_count", "HighLead_share")
     # keep only columns that exist (safety)
     ordered_cols <- ordered_cols[ordered_cols %in% names(out)]
     out <- out %>% select(any_of(ordered_cols))
@@ -201,6 +259,7 @@ server <- function(input, output, session) {
     
     out
   }, striped = TRUE, hover = TRUE, spacing = "m")
+  
   
   output$table_stratum <- renderTable({
     sim_data()$stratum_by_module %>%
@@ -227,5 +286,9 @@ server <- function(input, output, session) {
   })
 }
 shinyApp(ui = ui, server = server)
+
+
+
+
 
 
